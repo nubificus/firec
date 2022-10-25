@@ -402,6 +402,41 @@ impl<'m> Machine<'m> {
         Ok(())
     }
 
+
+    #[instrument(skip_all)]
+    async fn send_patch_request(&self, url: hyper::Uri, body: String) -> Result<(), Error> {
+        let vm_id = self.config.vm_id();
+        trace!("{vm_id}: sending request to url={url}, body={body}");
+
+        let request = Request::builder()
+            .method(Method::PATCH)
+            .uri(url.clone())
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))?;
+
+        let resp = self.client.request(request).await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            trace!("{vm_id}: request to url={url} successful");
+        } else {
+            let body = hyper::body::to_bytes(resp.into_body()).await?;
+            let body = if body.is_empty() {
+                trace!("{vm_id}: request to url={url} failed: status={status}");
+                None
+            } else {
+                let body = String::from_utf8_lossy(&body).into_owned();
+                trace!("{vm_id}: request to url={url} failed: status={status}, body={body}");
+                Some(body)
+            };
+            return Err(Error::FirecrackerAPIError { status, body });
+        }
+
+        Ok(())
+    }
+
+
     async fn send_action(&self, action: Action) -> Result<(), Error> {
         let url: hyper::Uri = Uri::new(&self.config.host_socket_path(), "/actions").into();
         let json = serde_json::to_string(&action)?;
