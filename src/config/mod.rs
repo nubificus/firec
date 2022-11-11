@@ -122,7 +122,7 @@ impl<'c> Config<'c> {
     pub fn host_socket_path(&self) -> PathBuf {
         let socket_path = self.socket_path.as_ref();
         let relative_path = socket_path.strip_prefix("/").unwrap_or(socket_path);
-        self.jailer().workspace_dir().join(relative_path)
+        self.socket_path.as_ref().to_path_buf()
     }
 
     /// The log path.

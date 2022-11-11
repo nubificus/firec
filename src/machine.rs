@@ -146,7 +146,7 @@ impl<'m> Machine<'m> {
 
         // FIXME: Assuming jailer for now.
         let jailer = self.config.jailer_cfg.as_mut().expect("no jailer config");
-        let jailer_bin = jailer.jailer_binary().to_owned();
+        let jailer_bin = jailer.exec_file().to_owned();
         let (mut cmd, daemonize_arg, stdin, stdout, stderr) = match &mut jailer.mode {
             JailerMode::Daemon => (
                 Command::new(jailer.jailer_binary()),
@@ -184,24 +184,7 @@ impl<'m> Machine<'m> {
         }
         let cmd = cmd
             .args(&[
-                "--id",
-                &vm_id,
-                "--exec-file",
-                jailer
-                    .exec_file()
-                    .to_str()
-                    .ok_or(Error::InvalidJailerExecPath)?,
-                "--uid",
-                &jailer.uid().to_string(),
-                "--gid",
-                &jailer.gid().to_string(),
-                "--chroot-base-dir",
-                jailer
-                    .chroot_base_dir()
-                    .to_str()
-                    .ok_or(Error::InvalidChrootBasePath)?,
                 // `firecracker` binary args.
-                "--",
                 "--api-sock",
                 self.config
                     .socket_path
@@ -225,7 +208,7 @@ impl<'m> Machine<'m> {
         // Give some time to the jailer to start up and create the socket.
         // FIXME: We should monitor the socket instead?
         info!("{vm_id}: Waiting for the jailer to start up...");
-        sleep(Duration::from_secs(10)).await;
+        sleep(Duration::from_secs(3)).await;
 
         if let Err(e) = self
             .setup_vm()
@@ -463,7 +446,7 @@ impl<'m> Machine<'m> {
                 .src_path()
                 .file_name()
                 .ok_or(Error::InvalidDrivePath)?;
-            drive_obj.src_path = Path::new(&drive_filename).into();
+            //drive_obj.src_path = Path::new(&drive_filename).into();
             let json = serde_json::to_string(&drive_obj)?;
             self.send_request(url, json).await?;
         }
