@@ -228,7 +228,7 @@ impl<'f> FreeMachine<'f> {
 
         Ok(())
     }
-    async fn send_action(&self, action: Action) -> Result<(), Error> {
+    pub async fn send_action(&self, action: Action) -> Result<(), Error> {
         let url: hyper::Uri = Uri::new(&self.vs_path(), "/actions").into();
         let json = serde_json::to_string(&action)?;
         self.send_request(url, json).await?;
@@ -824,7 +824,7 @@ impl<'m> Machine<'m> {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "action_type", rename_all = "PascalCase")]
-enum Action {
+pub enum Action {
     InstanceStart,
     SendCtrlAltDel,
     #[allow(unused)]
