@@ -36,6 +36,10 @@ pub enum Error {
     #[error("Invalid Jailer executable path specified")]
     InvalidJailerExecPath,
 
+    /// Invalid Config file.
+    #[error("Invalid Config path specified")]
+    InvalidConfigPath,
+
     /// Invalid initrd path specified.
     #[error("Invalid initrd path specified")]
     InvalidInitrdPath,

@@ -1,6 +1,6 @@
 //! A VMM machine.
 
-use std::{io::ErrorKind, path::Path, process::Stdio, time::Duration};
+use std::{borrow::Cow, io::ErrorKind, path::Path, process::Stdio, time::Duration};
 
 use crate::{
     config::{Config, JailerMode},
@@ -20,6 +20,7 @@ use tracing::{info, instrument, trace};
 
 use hyper::{Body, Client, Method, Request};
 use hyperlocal::{UnixClientExt, UnixConnector, Uri};
+use uuid::Uuid;
 
 /// A VMM machine.
 #[derive(Debug)]
@@ -27,6 +28,17 @@ pub struct Machine<'m> {
     config: Config<'m>,
     state: MachineState,
     client: Client<UnixConnector>,
+}
+/// Non-jailed VMM machine
+#[derive(Debug)]
+pub struct FreeMachine<'f> {
+    fc_path: Cow<'f, Path>,
+    vs_path: Cow<'f, Path>,
+    vm_id: Uuid,
+    state: MachineState,
+    client: Client<UnixConnector>,
+    config: Cow<'f, Path>,
+    has_conf: bool,
 }
 
 /// VM state
@@ -39,6 +51,232 @@ pub enum MachineState {
         /// Pid of a running jailer/firecraker process
         pid: i32,
     },
+}
+
+impl<'f> FreeMachine<'f> {
+    ///Create a new non-jailed machine that hasn't started yet
+    #[instrument(skip_all)]
+    pub async fn create() -> Result<FreeMachine<'f>, Error> {
+        Ok(Self {
+            fc_path: Path::new("/usr/bin/firecracker").into(),
+            vs_path: Path::new("/tmp/firecracker.socket").into(),
+            vm_id: Uuid::new_v4(),
+            state: MachineState::SHUTOFF,
+            client: Client::unix(),
+            config: Path::new("").into(),
+            has_conf: false,
+        })
+    }
+
+    ///Create a new non-jailed machine with args
+    #[instrument(skip_all)]
+    pub async fn create_with_args<P>(fc_path: P, vs_path: P) -> Result<FreeMachine<'f>, Error>
+    where
+        P: Into<Cow<'f, Path>>,
+    {
+        Ok(Self {
+            fc_path: fc_path.into(),
+            vs_path: vs_path.into(),
+            vm_id: Uuid::new_v4(),
+            state: MachineState::SHUTOFF,
+            client: Client::unix(),
+            config: Path::new("").into(),
+            has_conf: false,
+        })
+    }
+
+    ///Create a new non-jailed machine with config
+    #[instrument(skip_all)]
+    pub async fn create_with_conf<P>(
+        fc_path: P,
+        vs_path: P,
+        conf: P,
+    ) -> Result<FreeMachine<'f>, Error>
+    where
+        P: Into<Cow<'f, Path>>,
+    {
+        Ok(Self {
+            fc_path: fc_path.into(),
+            vs_path: vs_path.into(),
+            vm_id: Uuid::new_v4(),
+            state: MachineState::SHUTOFF,
+            client: Client::unix(),
+            config: conf.into(),
+            has_conf: true,
+        })
+    }
+    /// id getter
+    pub fn vm_id(&self) -> &Uuid {
+        &self.vm_id
+    }
+    /// fc binary getter
+    pub fn fc_path(&self) -> &Path {
+        &self.fc_path
+    }
+    /// vsock getter
+    pub fn vs_path(&self) -> &Path {
+        &self.vs_path
+    }
+    ///exec fc without starting
+    #[instrument(skip_all)]
+    pub async fn start(&mut self) -> Result<(), Error> {
+        let vm_id = self.vm_id();
+        info!("Starting machine with VM ID `{vm_id}`");
+        self.remove_socket().await?;
+        let mut cmd = Command::new(self.fc_path());
+        let cmd = match self.has_conf {
+            true => cmd
+                .args(&[
+                    "--config-file",
+                    self.config.to_str().ok_or(Error::InvalidConfigPath)?,
+                    "--api-sock",
+                    self.vs_path.to_str().ok_or(Error::InvalidSocketPath)?,
+                ])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit()),
+            false => cmd
+                .args(&[
+                    "--api-sock",
+                    self.vs_path.to_str().ok_or(Error::InvalidSocketPath)?,
+                ])
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit()),
+        };
+        trace!("{vm_id}: Running command: {:?}", cmd);
+        let mut child = cmd.spawn()?;
+        let pid: u32 = match child.id() {
+            Some(id) => id,
+            None => {
+                let exit_status = child.wait().await?;
+                return Err(Error::ProcessExitedImmediatelly { exit_status });
+            }
+        };
+        trace!("{vm_id}: VM started successfully.");
+        self.state = MachineState::RUNNING {
+            pid: pid.try_into()?,
+        };
+        Ok(())
+    }
+
+    /// Forcefully shutdown the machine.
+    ///
+    /// This will be done by killing VM process.
+    #[instrument(skip_all)]
+    pub async fn force_shutdown(&mut self) -> Result<(), Error> {
+        let vm_id = self.vm_id();
+        trace!("{vm_id}: Killing VM...");
+
+        let pid = match self.state {
+            MachineState::SHUTOFF => {
+                return Err(Error::ProcessNotStarted);
+            }
+            MachineState::RUNNING { pid } => pid,
+        };
+        let killed = task::spawn_blocking(move || {
+            let mut sys = System::new();
+            if sys.refresh_process_specifics(Pid::from(pid), ProcessRefreshKind::new()) {
+                match sys.process(Pid::from(pid)) {
+                    Some(process) => Ok(process.kill()),
+                    None => Err(Error::ProcessNotRunning(pid)),
+                }
+            } else {
+                Err(Error::ProcessNotRunning(pid))
+            }
+        })
+        .await??;
+
+        if !killed {
+            return Err(Error::ProcessNotKilled(pid));
+        }
+        trace!("{vm_id}: Successfully sent KILL signal to VM (pid: `{pid}`).");
+
+        self.state = MachineState::SHUTOFF;
+
+        Ok(())
+    }
+    #[instrument(skip_all)]
+    async fn send_request(&self, url: hyper::Uri, body: String) -> Result<(), Error> {
+        let vm_id = self.vm_id();
+        trace!("{vm_id}: sending request to url={url}, body={body}");
+
+        let request = Request::builder()
+            .method(Method::PUT)
+            .uri(url.clone())
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .body(Body::from(body))?;
+
+        let resp = self.client.request(request).await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            trace!("{vm_id}: request to url={url} successful");
+        } else {
+            let body = hyper::body::to_bytes(resp.into_body()).await?;
+            let body = if body.is_empty() {
+                trace!("{vm_id}: request to url={url} failed: status={status}");
+                None
+            } else {
+                let body = String::from_utf8_lossy(&body).into_owned();
+                trace!("{vm_id}: request to url={url} failed: status={status}, body={body}");
+                Some(body)
+            };
+            return Err(Error::FirecrackerAPIError { status, body });
+        }
+
+        Ok(())
+    }
+    async fn send_action(&self, action: Action) -> Result<(), Error> {
+        let url: hyper::Uri = Uri::new(&self.vs_path(), "/actions").into();
+        let json = serde_json::to_string(&action)?;
+        self.send_request(url, json).await?;
+
+        Ok(())
+    }
+    /// Delete the machine.
+    /// If machine is running, it is shut down before resources are deleted.
+    #[instrument(skip_all)]
+    pub async fn delete(mut self) -> Result<(), Error> {
+        let vm_id = self.vm_id().to_string();
+
+        if let MachineState::RUNNING { .. } = self.state {
+            if let Err(err) = self.shutdown().await {
+                trace!("{vm_id}: Shutdown error: {err}");
+            } else {
+                info!("{vm_id}: Waiting for the VM process to shut down...");
+                sleep(Duration::from_secs(10)).await;
+            }
+            if let Err(err) = self.force_shutdown().await {
+                trace!("{vm_id}: Forced shutdown error: {err}");
+            }
+        }
+        Ok(())
+    }
+    /// Shutdown requests a clean shutdown of the VM by sending CtrlAltDelete on the virtual keyboard.
+    #[instrument(skip_all)]
+    pub async fn shutdown(&self) -> Result<(), Error> {
+        let vm_id = self.vm_id();
+        trace!("{vm_id}: Sending CTRL+ALT+DEL to VM...");
+        self.send_action(Action::SendCtrlAltDel).await?;
+        trace!("{vm_id}: CTRL+ALT+DEL sent to VM successfully.");
+
+        Ok(())
+    }
+    /// remove the socket file if it exists
+    #[instrument(skip_all)]
+    async fn remove_socket(&self) -> Result<(), Error> {
+        let vm_id = self.vm_id();
+        match fs::remove_file(&self.vs_path).await {
+            Ok(_) => trace!("{vm_id}: Deleted `{}`", &self.vs_path.display()),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                trace!("{vm_id}: `{}` not found", &self.vs_path.display())
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
 }
 
 impl<'m> Machine<'m> {
@@ -401,8 +639,7 @@ impl<'m> Machine<'m> {
 
         Ok(())
     }
-
-
+    ///Same as send request but with PATCH instead of Post
     #[instrument(skip_all)]
     pub async fn send_patch_request(&self, url: hyper::Uri, body: String) -> Result<(), Error> {
         let vm_id = self.config.vm_id();
@@ -435,7 +672,6 @@ impl<'m> Machine<'m> {
 
         Ok(())
     }
-
 
     async fn send_action(&self, action: Action) -> Result<(), Error> {
         let url: hyper::Uri = Uri::new(&self.config.host_socket_path(), "/actions").into();
