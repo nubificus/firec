@@ -197,7 +197,7 @@ impl<'f> FreeMachine<'f> {
         Ok(())
     }
     #[instrument(skip_all)]
-    async fn send_request(&self, url: hyper::Uri, body: String) -> Result<(), Error> {
+    pub async fn send_request(&self, url: hyper::Uri, body: String) -> Result<(), Error> {
         let vm_id = self.vm_id();
         trace!("{vm_id}: sending request to url={url}, body={body}");
 
