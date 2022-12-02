@@ -196,6 +196,7 @@ impl<'f> FreeMachine<'f> {
 
         Ok(())
     }
+    /// send request to a free machine
     #[instrument(skip_all)]
     pub async fn send_request(&self, url: hyper::Uri, body: String) -> Result<(), Error> {
         let vm_id = self.vm_id();
@@ -228,6 +229,8 @@ impl<'f> FreeMachine<'f> {
 
         Ok(())
     }
+    /// send action to a free machine
+    #[instrument(skip_all)]
     pub async fn send_action(&self, action: Action) -> Result<(), Error> {
         let url: hyper::Uri = Uri::new(&self.vs_path(), "/actions").into();
         let json = serde_json::to_string(&action)?;
@@ -821,12 +824,15 @@ impl<'m> Machine<'m> {
         Ok(())
     }
 }
-
+///Actions of a Machine
 #[derive(Debug, Serialize)]
 #[serde(tag = "action_type", rename_all = "PascalCase")]
 pub enum Action {
+    ///start the machine
     InstanceStart,
+    ///terminate the machine(doesnt work on all archs
     SendCtrlAltDel,
+    /// flusht he metrics
     #[allow(unused)]
     FlushMetrics,
 }
