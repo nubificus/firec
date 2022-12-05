@@ -158,6 +158,7 @@ impl<'f> FreeMachine<'f> {
         self.state = MachineState::RUNNING {
             pid: pid.try_into()?,
         };
+        child.wait().await?;
         Ok(())
     }
 
