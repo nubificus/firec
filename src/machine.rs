@@ -33,7 +33,8 @@ pub struct Machine<'m> {
 #[derive(Debug)]
 pub struct FreeMachine<'f> {
     fc_path: Cow<'f, Path>,
-    vs_path: Cow<'f, Path>,
+    //api socket
+    as_path: Cow<'f, Path>,
     vm_id: Uuid,
     state: MachineState,
     client: Client<UnixConnector>,
@@ -59,7 +60,7 @@ impl<'f> FreeMachine<'f> {
     pub async fn create() -> Result<FreeMachine<'f>, Error> {
         Ok(Self {
             fc_path: Path::new("/usr/bin/firecracker").into(),
-            vs_path: Path::new("/tmp/firecracker.socket").into(),
+            as_path: Path::new("/tmp/firecracker.socket").into(),
             vm_id: Uuid::new_v4(),
             state: MachineState::SHUTOFF,
             client: Client::unix(),
@@ -70,13 +71,13 @@ impl<'f> FreeMachine<'f> {
 
     ///Create a new non-jailed machine with args
     #[instrument(skip_all)]
-    pub async fn create_with_args<P>(fc_path: P, vs_path: P) -> Result<FreeMachine<'f>, Error>
+    pub async fn create_with_args<P>(fc_path: P, as_path: P) -> Result<FreeMachine<'f>, Error>
     where
         P: Into<Cow<'f, Path>>,
     {
         Ok(Self {
             fc_path: fc_path.into(),
-            vs_path: vs_path.into(),
+            as_path: as_path.into(),
             vm_id: Uuid::new_v4(),
             state: MachineState::SHUTOFF,
             client: Client::unix(),
@@ -89,7 +90,7 @@ impl<'f> FreeMachine<'f> {
     #[instrument(skip_all)]
     pub async fn create_with_conf<P>(
         fc_path: P,
-        vs_path: P,
+        as_path: P,
         conf: P,
     ) -> Result<FreeMachine<'f>, Error>
     where
@@ -97,7 +98,7 @@ impl<'f> FreeMachine<'f> {
     {
         Ok(Self {
             fc_path: fc_path.into(),
-            vs_path: vs_path.into(),
+            as_path: as_path.into(),
             vm_id: Uuid::new_v4(),
             state: MachineState::SHUTOFF,
             client: Client::unix(),
@@ -114,8 +115,8 @@ impl<'f> FreeMachine<'f> {
         &self.fc_path
     }
     /// vsock getter
-    pub fn vs_path(&self) -> &Path {
-        &self.vs_path
+    pub fn as_path(&self) -> &Path {
+        &self.as_path
     }
     ///exec fc without starting
     #[instrument(skip_all)]
@@ -130,7 +131,7 @@ impl<'f> FreeMachine<'f> {
                     "--config-file",
                     self.config.to_str().ok_or(Error::InvalidConfigPath)?,
                     "--api-sock",
-                    self.vs_path.to_str().ok_or(Error::InvalidSocketPath)?,
+                    self.as_path.to_str().ok_or(Error::InvalidSocketPath)?,
                 ])
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
@@ -138,7 +139,7 @@ impl<'f> FreeMachine<'f> {
             false => cmd
                 .args(&[
                     "--api-sock",
-                    self.vs_path.to_str().ok_or(Error::InvalidSocketPath)?,
+                    self.as_path.to_str().ok_or(Error::InvalidSocketPath)?,
                 ])
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
@@ -232,7 +233,7 @@ impl<'f> FreeMachine<'f> {
     /// send action to a free machine
     #[instrument(skip_all)]
     pub async fn send_action(&self, action: Action) -> Result<(), Error> {
-        let url: hyper::Uri = Uri::new(&self.vs_path(), "/actions").into();
+        let url: hyper::Uri = Uri::new(&self.as_path(), "/actions").into();
         let json = serde_json::to_string(&action)?;
         self.send_request(url, json).await?;
 
@@ -271,10 +272,10 @@ impl<'f> FreeMachine<'f> {
     #[instrument(skip_all)]
     async fn remove_socket(&self) -> Result<(), Error> {
         let vm_id = self.vm_id();
-        match fs::remove_file(&self.vs_path).await {
-            Ok(_) => trace!("{vm_id}: Deleted `{}`", &self.vs_path.display()),
+        match fs::remove_file(&self.as_path).await {
+            Ok(_) => trace!("{vm_id}: Deleted `{}`", &self.as_path.display()),
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                trace!("{vm_id}: `{}` not found", &self.vs_path.display())
+                trace!("{vm_id}: `{}` not found", &self.as_path.display())
             }
             Err(e) => return Err(e.into()),
         }
